@@ -1,0 +1,23 @@
+{
+  "type": "panel",
+  "items": {
+    "host": {
+      "type": "text",
+      "label": "IP-Adresse oder Hostname des KSEM",
+      "placeholder": "192.168.0.131",
+      "help": "Ohne http:// und ohne Slash am Ende",
+      "sm": 12,
+      "md": 6,
+      "newLine": true,
+      "validator": "^[^/]+$",
+      "validatorErrorText": "Kein http:// oder / verwenden"
+    },
+    "password": {
+      "type": "password",
+      "label": "Passwort (Admin-Passwort der KSEM Weboberfläche)",
+      "sm": 12,
+      "md": 6,
+      "newLine": false
+    }
+  }
+}
