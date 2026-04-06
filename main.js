@@ -1,0 +1,350 @@
+'use strict';
+
+const utils     = require('@iobroker/adapter-core');
+const http      = require('http');
+const WebSocket = require('ws');
+const { decodeSmartMeterMessage, decodeSumvaluesMessage } = require('./lib/protobuf');
+const { decodeObisDatapoint } = require('./lib/obis');
+
+const SUMVALUES_STATES = {
+    gridPowerTotal:            { name: 'Netzleistung gesamt (+Bezug/-Einspeisung)', unit: 'W',  role: 'value.power',   type: 'number' },
+    pvPowerTotal:              { name: 'PV-Leistung gesamt (DC)',                   unit: 'W',  role: 'value.power',   type: 'number' },
+    pvPowerACSum:              { name: 'PV-Leistung gesamt (AC)',                   unit: 'W',  role: 'value.power',   type: 'number' },
+    housePowerTotal:           { name: 'Hausverbrauch gesamt',                      unit: 'W',  role: 'value.power',   type: 'number' },
+    homeConsumptionPV:         { name: 'Eigenverbrauch PV',                         unit: 'W',  role: 'value.power',   type: 'number' },
+    homeConsumptionGrid:       { name: 'Hausverbrauch aus Netz',                    unit: 'W',  role: 'value.power',   type: 'number' },
+    homeConsumptionBattery:    { name: 'Hausverbrauch aus Batterie',                unit: 'W',  role: 'value.power',   type: 'number' },
+    batteryPowerTotal:         { name: 'Batterieleistung gesamt',                   unit: 'W',  role: 'value.power',   type: 'number' },
+    batteryPowerACSum:         { name: 'Batterieleistung AC',                       unit: 'W',  role: 'value.power',   type: 'number' },
+    inverterPowerTotal:        { name: 'Wechselrichterleistung gesamt',             unit: 'W',  role: 'value.power',   type: 'number' },
+    wallboxPowerTotal:         { name: 'Wallbox-Leistung gesamt',                   unit: 'W',  role: 'value.power',   type: 'number' },
+    wallboxConsumptionPV:      { name: 'Wallbox Eigenverbrauch PV',                 unit: 'W',  role: 'value.power',   type: 'number' },
+    wallboxConsumptionGrid:    { name: 'Wallbox Verbrauch aus Netz',                unit: 'W',  role: 'value.power',   type: 'number' },
+    wallboxConsumptionBattery: { name: 'Wallbox Verbrauch aus Batterie',            unit: 'W',  role: 'value.power',   type: 'number' },
+    systemStateOfCharge:       { name: 'Batterie SOC',                              unit: '%',  role: 'value.battery', type: 'number' },
+    inverterCurtailment:       { name: 'Wechselrichter Abregelung aktiv',           unit: '',   role: 'value',         type: 'number' },
+    auxiliaryPowerTotal:       { name: 'Hilfsverbrauch gesamt',                     unit: 'W',  role: 'value.power',   type: 'number' },
+    smartGridLimit:            { name: 'Smart Grid Limit',                          unit: 'W',  role: 'value.power',   type: 'number' },
+    batteryChargeLimit:        { name: 'Batterie Ladelimit',                        unit: 'W',  role: 'value.power',   type: 'number' },
+    batteryDischargeLimit:     { name: 'Batterie Entladelimit',                     unit: 'W',  role: 'value.power',   type: 'number' },
+};
+
+const WALLBOX_POLL_INTERVAL = 5000;
+
+class KostalKsem extends utils.Adapter {
+    constructor(options = {}) {
+        super({ ...options, name: 'kostal-ksem' });
+
+        this._token         = null;
+        this._tokenExpiry   = 0;
+        this._wsSmartMeter  = null;
+        this._wsSumvalues   = null;
+        this._reconnTimer   = null;
+        this._wallboxTimer  = null;
+        this._statesCreated = false;
+        this._wallboxIds    = new Set();
+
+        // Cache: verhindert unnötige setState-Aufrufe
+        this._stateCache    = new Map();
+        // Cache: verhindert wiederholte setObjectNotExistsAsync-Aufrufe
+        this._objectCache   = new Set();
+
+        this.on('ready',  this._onReady.bind(this));
+        this.on('unload', this._onUnload.bind(this));
+    }
+
+    async _onReady() {
+        this.log.info('KOSTAL KSEM Adapter gestartet');
+        this.setState('info.connection', false, true);
+        await this._connect();
+    }
+
+    async _onUnload(callback) {
+        this._clearReconnTimer();
+        this._clearWallboxTimer();
+        this._closeWs(this._wsSmartMeter);
+        this._closeWs(this._wsSumvalues);
+        this.setState('info.connection', false, true);
+        callback();
+    }
+
+    async _connect() {
+        try {
+            await this._login();
+            await this._ensureStates();
+            this._openSmartMeterWs();
+            this._openSumvaluesWs();
+            this._startWallboxPolling();
+        } catch (err) {
+            this.log.error(`Verbindungsfehler: ${err.message}`);
+            this._scheduleReconnect();
+        }
+    }
+
+    _scheduleReconnect(delay = 30000) {
+        this._clearReconnTimer();
+        this._clearWallboxTimer();
+        this.setState('info.connection', false, true);
+        this.log.info(`Neuverbindung in ${delay / 1000}s ...`);
+        this._reconnTimer = setTimeout(() => this._connect(), delay);
+    }
+
+    _clearReconnTimer() {
+        if (this._reconnTimer) { clearTimeout(this._reconnTimer); this._reconnTimer = null; }
+    }
+
+    // ----------------------------------------------------------------
+    // Gecachtes setState — schreibt nur wenn Wert sich geändert hat
+    // ----------------------------------------------------------------
+    _setStateCached(id, val) {
+        const cached = this._stateCache.get(id);
+        if (cached === val) return; // keine Änderung → kein Event
+        this._stateCache.set(id, val);
+        this.setState(id, { val, ack: true });
+    }
+
+    // ----------------------------------------------------------------
+    // Gecachtes setObjectNotExistsAsync — nur einmal pro Session
+    // ----------------------------------------------------------------
+    async _ensureObject(id, obj) {
+        if (this._objectCache.has(id)) return;
+        this._objectCache.add(id);
+        await this.setObjectNotExistsAsync(id, obj);
+    }
+
+    async _ensureChannel(id, name) {
+        await this._ensureObject(id, { type: 'channel', common: { name }, native: {} });
+    }
+
+    async _ensureState(id, name, type, role, unit = '') {
+        await this._ensureObject(id, {
+            type: 'state',
+            common: { name, type, role, unit, read: true, write: false },
+            native: {},
+        });
+    }
+
+    // ----------------------------------------------------------------
+    // Login / Token
+    // ----------------------------------------------------------------
+    async _login() {
+        const { host, password } = this.config;
+        const body = `grant_type=password&client_id=emos&client_secret=56951025&username=admin&password=${encodeURIComponent(password)}`;
+        const data = await this._httpPost(`http://${host}/api/web-login/token`, body);
+        const json = JSON.parse(data);
+        if (!json.access_token) throw new Error(`Login fehlgeschlagen: ${JSON.stringify(json)}`);
+        this._token       = json.access_token;
+        this._tokenExpiry = Date.now() + (json.expires_in - 3600) * 1000;
+        this.log.info(`Login OK, Token gültig für ${Math.round(json.expires_in / 3600)}h`);
+        await this._fetchDeviceInfo();
+    }
+
+    async _ensureToken() {
+        if (Date.now() > this._tokenExpiry) {
+            this.log.info('Token abgelaufen, erneuere ...');
+            await this._login();
+        }
+    }
+
+    async _fetchDeviceInfo() {
+        try {
+            const data = await this._httpGet(`http://${this.config.host}/api/device-settings`, this._token);
+            const info = JSON.parse(data);
+            this._setStateCached('info.serial',   info.Serial);
+            this._setStateCached('info.firmware', info.FirmwareVersion);
+            this._setStateCached('info.hostname', info.hostname);
+            this._setStateCached('info.mac',      info.Mac);
+            this.log.info(`Gerät: ${info.ProductName} SN=${info.Serial} FW=${info.FirmwareVersion}`);
+        } catch (err) {
+            this.log.warn(`Geräteinfo Fehler: ${err.message}`);
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // States einmalig anlegen (beim Start)
+    // ----------------------------------------------------------------
+    async _ensureStates() {
+        if (this._statesCreated) return;
+        this._statesCreated = true;
+
+        for (const [id, name] of [
+            ['info',       'Geräteinfo'],
+            ['smartmeter', 'KSEM Messwerte'],
+            ['energyflow', 'Energiefluss'],
+            ['wallbox',    'Wallbox'],
+        ]) {
+            await this._ensureChannel(id, name);
+        }
+
+        await this._ensureState('info.serial',   'Seriennummer',     'string', 'text');
+        await this._ensureState('info.firmware', 'Firmware-Version', 'string', 'text');
+        await this._ensureState('info.hostname', 'Hostname',         'string', 'text');
+        await this._ensureState('info.mac',      'MAC-Adresse',      'string', 'text');
+
+        for (const [key, def] of Object.entries(SUMVALUES_STATES)) {
+            await this._ensureState(`energyflow.${key}`, def.name, def.type, def.role, def.unit);
+        }
+    }
+
+    // Smart-Meter States: ebenfalls gecacht, werden nur einmal angelegt
+    async _ensureSmartMeterState(stateId, unit, role) {
+        await this._ensureState(`smartmeter.${stateId}`, stateId, 'number', role, unit);
+    }
+
+    async _ensureWallboxStates(uuid) {
+        if (this._wallboxIds.has(uuid)) return;
+        this._wallboxIds.add(uuid);
+        const base = `wallbox.${uuid}`;
+        await this._ensureChannel(base, `Wallbox ${uuid}`);
+        for (const [id, name, type, role, unit] of [
+            [`${base}.connected`,   'Fahrzeug verbunden',       'boolean', 'indicator',     ''],
+            [`${base}.charging`,    'Lädt gerade',              'boolean', 'indicator',     ''],
+            [`${base}.min_current`, 'Minimalstrom',             'number',  'value.current', 'A'],
+            [`${base}.max_current`, 'Maximalstrom',             'number',  'value.current', 'A'],
+            [`${base}.phases_l1`,   'Phase L1 aktiv',           'boolean', 'indicator',     ''],
+            [`${base}.phases_l2`,   'Phase L2 aktiv',           'boolean', 'indicator',     ''],
+            [`${base}.phases_l3`,   'Phase L3 aktiv',           'boolean', 'indicator',     ''],
+            [`${base}.phase_usage`, 'Phasennutzung (1 oder 3)', 'number',  'value',         ''],
+        ]) {
+            await this._ensureState(id, name, type, role, unit);
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // WebSocket: Smart Meter
+    // ----------------------------------------------------------------
+    _openSmartMeterWs() {
+        const url = `ws://${this.config.host}/api/data-transfer/ws/protobuf/gdr/local/values/smart-meter`;
+        this._wsSmartMeter = this._openWs(url, 'smart-meter', async (buf) => {
+            try {
+                const dps = decodeSmartMeterMessage(buf);
+                for (const { id, rawValue } of dps) {
+                    const dp = decodeObisDatapoint(id, rawValue);
+                    if (!dp) continue;
+                    await this._ensureSmartMeterState(dp.stateId, dp.unit, dp.role);
+                    this._setStateCached(`smartmeter.${dp.stateId}`, dp.value);
+                }
+            } catch (err) {
+                this.log.warn(`Smart-Meter Fehler: ${err.message}`);
+            }
+        });
+    }
+
+    // ----------------------------------------------------------------
+    // WebSocket: Energiefluss
+    // ----------------------------------------------------------------
+    _openSumvaluesWs() {
+        const url = `ws://${this.config.host}/api/data-transfer/ws/protobuf/gdr/local/values/kostal-energyflow/sumvalues`;
+        this._wsSumvalues = this._openWs(url, 'sumvalues', async (buf) => {
+            try {
+                const values = decodeSumvaluesMessage(buf);
+                for (const [key, val] of Object.entries(values)) {
+                    if (val === null || !(key in SUMVALUES_STATES)) continue;
+                    this._setStateCached(`energyflow.${key}`, Math.round(val * 10) / 10);
+                }
+            } catch (err) {
+                this.log.warn(`Sumvalues Fehler: ${err.message}`);
+            }
+        });
+    }
+
+    // ----------------------------------------------------------------
+    // Wallbox Polling
+    // ----------------------------------------------------------------
+    _startWallboxPolling() {
+        this._clearWallboxTimer();
+        this._pollWallbox();
+        this._wallboxTimer = setInterval(() => this._pollWallbox(), WALLBOX_POLL_INTERVAL);
+    }
+
+    _clearWallboxTimer() {
+        if (this._wallboxTimer) { clearInterval(this._wallboxTimer); this._wallboxTimer = null; }
+    }
+
+    async _pollWallbox() {
+        try {
+            await this._ensureToken();
+            const [phaseData, evData] = await Promise.all([
+                this._httpGet(`http://${this.config.host}/api/e-mobility/config/phaseswitching`, this._token),
+                this._httpGet(`http://${this.config.host}/api/e-mobility/evparameterlist`, this._token),
+            ]);
+            const phaseJson = JSON.parse(phaseData);
+            const evJson    = JSON.parse(evData);
+
+            for (const [uuid, params] of Object.entries(evJson)) {
+                await this._ensureWallboxStates(uuid);
+                const base      = `wallbox.${uuid}`;
+                const connected = !!(params.phases_used?.total || params.min_current > 0 || params.max_current > 0);
+                const charging  = !!(params.phases_used?.l1 || params.phases_used?.l2 || params.phases_used?.l3);
+
+                this._setStateCached(`${base}.connected`,   connected);
+                this._setStateCached(`${base}.charging`,    charging);
+                this._setStateCached(`${base}.min_current`, params.min_current ?? 0);
+                this._setStateCached(`${base}.max_current`, params.max_current ?? 0);
+                this._setStateCached(`${base}.phases_l1`,   !!params.phases_used?.l1);
+                this._setStateCached(`${base}.phases_l2`,   !!params.phases_used?.l2);
+                this._setStateCached(`${base}.phases_l3`,   !!params.phases_used?.l3);
+                this._setStateCached(`${base}.phase_usage`, phaseJson.phase_usage ?? 0);
+            }
+        } catch (err) {
+            this.log.warn(`Wallbox Polling Fehler: ${err.message}`);
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // WebSocket Helper
+    // ----------------------------------------------------------------
+    _openWs(url, label, onMessage) {
+        let ws;
+        try { ws = new WebSocket(url); } catch (err) {
+            this.log.error(`WS ${label} Fehler: ${err.message}`);
+            return null;
+        }
+        ws.on('open', () => {
+            this.log.debug(`${label} verbunden`);
+            ws.send(`Bearer ${this._token}`);
+            this.setState('info.connection', true, true);
+        });
+        ws.on('message', (data) => { if (Buffer.isBuffer(data)) onMessage(data); });
+        ws.on('error',   (err)  => { this.log.warn(`${label} WS Fehler: ${err.message}`); });
+        ws.on('close',   (code) => {
+            this.log.warn(`${label} WS geschlossen (${code})`);
+            this.setState('info.connection', false, true);
+            this._scheduleReconnect();
+        });
+        return ws;
+    }
+
+    _closeWs(ws) { if (ws) { try { ws.terminate(); } catch {} } }
+
+    // ----------------------------------------------------------------
+    // HTTP Helpers
+    // ----------------------------------------------------------------
+    _httpPost(url, body) {
+        return new Promise((resolve, reject) => {
+            const { hostname, port, pathname } = new URL(url);
+            const req = http.request({
+                hostname, port: port || 80, path: pathname, method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(body) },
+            }, (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => resolve(d)); });
+            req.on('error', reject); req.write(body); req.end();
+        });
+    }
+
+    _httpGet(url, token) {
+        return new Promise((resolve, reject) => {
+            const { hostname, port, pathname } = new URL(url);
+            const req = http.request({
+                hostname, port: port || 80, path: pathname, method: 'GET',
+                headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+            }, (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => resolve(d)); });
+            req.on('error', reject); req.end();
+        });
+    }
+}
+
+if (require.main !== module) {
+    module.exports = (options) => new KostalKsem(options);
+} else {
+    new KostalKsem();
+}
