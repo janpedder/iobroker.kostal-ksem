@@ -133,8 +133,7 @@ class KostalKsem extends utils.Adapter {
             this._openSmartMeterWs();
             if (this._cfg('enableEnergyflow', true)) this._openSumvaluesWs();
             if (this._cfg('enableWallbox',    true)) {
-                this._startWallboxPolling();
-                this._startStatePolling();
+                this._startWallboxPolling(); // startet auch _startStatePolling nach erstem Poll
             }
         } catch (err) {
             this.log.error(`Verbindungsfehler: ${err.message}`);
@@ -324,7 +323,8 @@ class KostalKsem extends utils.Adapter {
     // ----------------------------------------------------------------
     _startWallboxPolling() {
         this._clearWallboxTimer();
-        this._pollWallbox();
+        // Erst pollWallbox (legt States an), dann pollState starten
+        this._pollWallbox().then(() => this._startStatePolling());
         const interval = Math.max(2, this._cfg('wallboxPollInterval', 5)) * 1000;
         this._wallboxTimer = setInterval(() => this._pollWallbox(), interval);
     }

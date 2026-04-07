@@ -1,6 +1,6 @@
 {
   "name": "iobroker.kostal-ksem",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "ioBroker Adapter für KOSTAL Smart Energy Meter (KSEM) via WebSocket/JSON API",
   "author": "Jan Pedder",
   "license": "MIT",
