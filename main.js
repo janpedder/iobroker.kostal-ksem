@@ -7,31 +7,6 @@ const { decodeSmartMeterMessage, decodeSumvaluesMessage } = require('./lib/proto
 const { decodeObisDatapoint } = require('./lib/obis');
 
 // -------------------------------------------------------------------
-// OBIS C-Gruppe → Konfigurationsgruppe
-// C-Werte aus obis.js: 0x01-0x0e = gesamt, 0x15-0x21 = L1, 0x29-0x35 = L2, 0x3d-0x49 = L3
-// D=0x08 = Energiezähler, D=0x04 = Momentanwert
-// -------------------------------------------------------------------
-function getSmGroup(stateId) {
-    // stateId z.B. "active_power_plus", "voltage_l1", "active_power_plus_l1_kwh"
-    const isKwh = stateId.endsWith('_kwh');
-    const isL1  = stateId.includes('_l1');
-    const isL2  = stateId.includes('_l2');
-    const isL3  = stateId.includes('_l3');
-
-    if (isKwh) {
-        if (isL1) return 'enableSmEnergyL1';
-        if (isL2) return 'enableSmEnergyL2';
-        if (isL3) return 'enableSmEnergyL3';
-        return 'enableSmEnergyTotal';
-    } else {
-        if (isL1) return 'enableSmL1';
-        if (isL2) return 'enableSmL2';
-        if (isL3) return 'enableSmL3';
-        return 'enableSmTotal';
-    }
-}
-
-// -------------------------------------------------------------------
 // Sumvalues State-Definitionen
 // -------------------------------------------------------------------
 const SUMVALUES_STATES = {
@@ -57,6 +32,27 @@ const SUMVALUES_STATES = {
     batteryDischargeLimit:     { name: 'Batterie Entladelimit',                     unit: 'W',  role: 'value.power',   type: 'number' },
 };
 
+// OBIS Gruppe → Konfigurationsschlüssel
+function getSmGroup(stateId) {
+    const isKwh = stateId.endsWith('_kwh');
+    const isL1  = stateId.includes('_l1');
+    const isL2  = stateId.includes('_l2');
+    const isL3  = stateId.includes('_l3');
+    if (isKwh) {
+        if (isL1) return 'enableSmEnergyL1';
+        if (isL2) return 'enableSmEnergyL2';
+        if (isL3) return 'enableSmEnergyL3';
+        return 'enableSmEnergyTotal';
+    } else {
+        if (isL1) return 'enableSmL1';
+        if (isL2) return 'enableSmL2';
+        if (isL3) return 'enableSmL3';
+        return 'enableSmTotal';
+    }
+}
+
+const VALID_CHARGEMODES = ['lock', 'grid', 'pv', 'hybrid'];
+
 // -------------------------------------------------------------------
 class KostalKsem extends utils.Adapter {
     constructor(options = {}) {
@@ -68,16 +64,17 @@ class KostalKsem extends utils.Adapter {
         this._wsSumvalues   = null;
         this._reconnTimer   = null;
         this._wallboxTimer  = null;
+        this._stateTimer    = null;
         this._statesCreated = false;
         this._wallboxIds    = new Set();
         this._stateCache    = new Map();
         this._objectCache   = new Set();
 
-        this.on('ready',  this._onReady.bind(this));
-        this.on('unload', this._onUnload.bind(this));
+        this.on('ready',        this._onReady.bind(this));
+        this.on('unload',       this._onUnload.bind(this));
+        this.on('stateChange',  this._onStateChange.bind(this));
     }
 
-    // Konfiguration mit Defaults lesen
     _cfg(key, def) {
         const v = this.config[key];
         return (v === undefined || v === null) ? def : v;
@@ -86,25 +83,59 @@ class KostalKsem extends utils.Adapter {
     async _onReady() {
         this.log.info('KOSTAL KSEM Adapter gestartet');
         this.setState('info.connection', false, true);
+        this.subscribeStates('wallbox.*.chargemode');
+        this.subscribeStates('wallbox.*.pause');
+        this.subscribeStates('wallbox.*.phase_usage');
         await this._connect();
     }
 
     async _onUnload(callback) {
         this._clearReconnTimer();
         this._clearWallboxTimer();
+        this._clearStateTimer();
         this._closeWs(this._wsSmartMeter);
         this._closeWs(this._wsSumvalues);
         this.setState('info.connection', false, true);
         callback();
     }
 
+    // ----------------------------------------------------------------
+    // State-Change Handler — schreibbare States
+    // ----------------------------------------------------------------
+    async _onStateChange(id, state) {
+        if (!state || state.ack) return; // nur unacknowledged (von außen geschrieben)
+        const parts = id.split('.');
+        // id z.B. "kostal-ksem.0.wallbox.2a1baa2c-.../chargemode"
+        const channel = parts[parts.length - 1];
+        const uuid    = parts[parts.length - 2];
+
+        try {
+            await this._ensureToken();
+            if (channel === 'chargemode') {
+                await this._setChargemode(uuid, String(state.val).toLowerCase());
+            } else if (channel === 'pause') {
+                await this._setPause(uuid, Boolean(state.val));
+            } else if (channel === 'phase_usage') {
+                await this._setPhaseswitching(Number(state.val));
+            }
+        } catch (err) {
+            this.log.error(`State-Change Fehler (${id}): ${err.message}`);
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // Verbindungsaufbau
+    // ----------------------------------------------------------------
     async _connect() {
         try {
             await this._login();
             await this._ensureStates();
             this._openSmartMeterWs();
             if (this._cfg('enableEnergyflow', true)) this._openSumvaluesWs();
-            if (this._cfg('enableWallbox',    true)) this._startWallboxPolling();
+            if (this._cfg('enableWallbox',    true)) {
+                this._startWallboxPolling();
+                this._startStatePolling();
+            }
         } catch (err) {
             this.log.error(`Verbindungsfehler: ${err.message}`);
             this._scheduleReconnect();
@@ -114,6 +145,7 @@ class KostalKsem extends utils.Adapter {
     _scheduleReconnect(delay = 30000) {
         this._clearReconnTimer();
         this._clearWallboxTimer();
+        this._clearStateTimer();
         this.setState('info.connection', false, true);
         this.log.info(`Neuverbindung in ${delay / 1000}s ...`);
         this._reconnTimer = setTimeout(() => this._connect(), delay);
@@ -132,9 +164,6 @@ class KostalKsem extends utils.Adapter {
         this.setState(id, { val, ack: true });
     }
 
-    // ----------------------------------------------------------------
-    // Gecachtes setObjectNotExistsAsync — nur einmal pro Session
-    // ----------------------------------------------------------------
     async _ensureObject(id, obj) {
         if (this._objectCache.has(id)) return;
         this._objectCache.add(id);
@@ -145,10 +174,10 @@ class KostalKsem extends utils.Adapter {
         await this._ensureObject(id, { type: 'channel', common: { name }, native: {} });
     }
 
-    async _ensureState(id, name, type, role, unit = '') {
+    async _ensureState(id, name, type, role, unit = '', write = false) {
         await this._ensureObject(id, {
             type: 'state',
-            common: { name, type, role, unit, read: true, write: false },
+            common: { name, type, role, unit, read: true, write },
             native: {},
         });
     }
@@ -162,9 +191,15 @@ class KostalKsem extends utils.Adapter {
         const data = await this._httpPost(`http://${host}/api/web-login/token`, body);
         const json = JSON.parse(data);
         if (!json.access_token) throw new Error(`Login fehlgeschlagen: ${JSON.stringify(json)}`);
-        this._token       = json.access_token;
-        this._tokenExpiry = Date.now() + (json.expires_in - 3600) * 1000;
-        this.log.info(`Login OK, Token gültig für ${Math.round(json.expires_in / 3600)}h`);
+
+        this._token = json.access_token;
+
+        // KSEM liefert expires_in manchmal in ms (>100000), manchmal in Sekunden
+        const expiresIn = json.expires_in || 3600;
+        const expiresInSec = expiresIn > 100000 ? Math.round(expiresIn / 1000) : expiresIn;
+        this._tokenExpiry = Date.now() + (expiresInSec - 60) * 1000;
+
+        this.log.info(`Login OK, Token gültig für ${Math.round(expiresInSec / 60)}min`);
         await this._fetchDeviceInfo();
     }
 
@@ -222,18 +257,26 @@ class KostalKsem extends utils.Adapter {
         this._wallboxIds.add(uuid);
         const base = `wallbox.${uuid}`;
         await this._ensureChannel(base, `Wallbox ${uuid}`);
+
+        // Lesbare States
         for (const [id, name, type, role, unit] of [
-            [`${base}.connected`,   'Fahrzeug verbunden',       'boolean', 'indicator',     ''],
-            [`${base}.charging`,    'Lädt gerade',              'boolean', 'indicator',     ''],
-            [`${base}.min_current`, 'Minimalstrom',             'number',  'value.current', 'A'],
-            [`${base}.max_current`, 'Maximalstrom',             'number',  'value.current', 'A'],
-            [`${base}.phases_l1`,   'Phase L1 aktiv',           'boolean', 'indicator',     ''],
-            [`${base}.phases_l2`,   'Phase L2 aktiv',           'boolean', 'indicator',     ''],
-            [`${base}.phases_l3`,   'Phase L3 aktiv',           'boolean', 'indicator',     ''],
-            [`${base}.phase_usage`, 'Phasennutzung (1 oder 3)', 'number',  'value',         ''],
+            [`${base}.connected`,       'Fahrzeug verbunden',         'boolean', 'indicator',     ''],
+            [`${base}.charging`,        'Lädt gerade',                'boolean', 'indicator',     ''],
+            [`${base}.min_current`,     'Minimalstrom',               'number',  'value.current', 'A'],
+            [`${base}.max_current`,     'Maximalstrom',               'number',  'value.current', 'A'],
+            [`${base}.phases_l1`,       'Phase L1 aktiv',             'boolean', 'indicator',     ''],
+            [`${base}.phases_l2`,       'Phase L2 aktiv',             'boolean', 'indicator',     ''],
+            [`${base}.phases_l3`,       'Phase L3 aktiv',             'boolean', 'indicator',     ''],
+            [`${base}.charging_power_w`,'Ladeleistung',               'number',  'value.power',   'W'],
+            [`${base}.available_power_w`,'Verfügbare Leistung',       'number',  'value.power',   'W'],
         ]) {
-            await this._ensureState(id, name, type, role, unit);
+            await this._ensureState(id, name, type, role, unit, false);
         }
+
+        // Schreibbare States
+        await this._ensureState(`${base}.chargemode`,  'Lademodus (pv/hybrid/grid/lock)', 'string',  'text',      '', true);
+        await this._ensureState(`${base}.pause`,       'Laden pausieren',                 'boolean', 'switch',    '', true);
+        await this._ensureState(`${base}.phase_usage`, 'Phasen (0=3-phasig, 1=1-phasig)', 'number',  'value',     '', true);
     }
 
     // ----------------------------------------------------------------
@@ -247,11 +290,8 @@ class KostalKsem extends utils.Adapter {
                 for (const { id, rawValue } of dps) {
                     const dp = decodeObisDatapoint(id, rawValue);
                     if (!dp) continue;
-
-                    // Prüfen ob diese Gruppe in der Konfiguration aktiviert ist
                     const group = getSmGroup(dp.stateId);
                     if (!this._cfg(group, true)) continue;
-
                     await this._ensureSmartMeterState(dp.stateId, dp.unit, dp.role);
                     this._setStateCached(`smartmeter.${dp.stateId}`, dp.value);
                 }
@@ -280,7 +320,7 @@ class KostalKsem extends utils.Adapter {
     }
 
     // ----------------------------------------------------------------
-    // Wallbox Polling
+    // Wallbox Polling (evparameterlist + phaseswitching)
     // ----------------------------------------------------------------
     _startWallboxPolling() {
         this._clearWallboxTimer();
@@ -324,6 +364,97 @@ class KostalKsem extends utils.Adapter {
     }
 
     // ----------------------------------------------------------------
+    // State Polling (e-mobility/state → Ladeleistung + verfügbare Leistung)
+    // ----------------------------------------------------------------
+    _startStatePolling() {
+        this._clearStateTimer();
+        this._pollState();
+        this._stateTimer = setInterval(() => this._pollState(), 30000); // alle 30s
+    }
+
+    _clearStateTimer() {
+        if (this._stateTimer) { clearInterval(this._stateTimer); this._stateTimer = null; }
+    }
+
+    async _pollState() {
+        try {
+            await this._ensureToken();
+            const data = await this._httpGet(`http://${this.config.host}/api/e-mobility/state`, this._token);
+            const d    = JSON.parse(data);
+            if (!d || typeof d !== 'object') return;
+
+            const ev      = d.EvChargingPower   || {};
+            const curtail = d.CurtailmentSetpoint || {};
+
+            // mW → W
+            const watt  = Math.round((ev.total || 0) / 1000);
+            // mA × 230V → W
+            const avail = Math.round(((curtail.l1 || 0) + (curtail.l2 || 0) + (curtail.l3 || 0)) / 1000 * 230);
+
+            // Für alle bekannten Wallbox-UUIDs setzen
+            for (const uuid of this._wallboxIds) {
+                this._setStateCached(`wallbox.${uuid}.charging_power_w`,  watt);
+                this._setStateCached(`wallbox.${uuid}.available_power_w`, avail);
+            }
+        } catch (err) {
+            this.log.warn(`State Polling Fehler: ${err.message}`);
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // Wallbox Steuerung
+    // ----------------------------------------------------------------
+    async _setChargemode(uuid, mode) {
+        if (!VALID_CHARGEMODES.includes(mode)) {
+            this.log.warn(`Ungültiger Lademodus: ${mode}`);
+            return;
+        }
+        const body = JSON.stringify({
+            mode,
+            minpvpowerquota:      100,
+            mincharginpowerquota: 0,
+            controlledby:         0,
+        });
+        const code = await this._httpPut(
+            `http://${this.config.host}/api/e-mobility/config/chargemode`,
+            body
+        );
+        if (code === 204) {
+            this.log.info(`Lademodus gesetzt: ${mode}`);
+            this._setStateCached(`wallbox.${uuid}.chargemode`, mode);
+        } else {
+            this.log.warn(`Chargemode PUT fehlgeschlagen: HTTP ${code}`);
+        }
+    }
+
+    async _setPause(uuid, pause) {
+        const body = JSON.stringify({ pause });
+        const code = await this._httpPut(
+            `http://${this.config.host}/api/e-mobility/evse/${uuid}/setcharging`,
+            body
+        );
+        if (code === 204) {
+            this.log.info(`Laden ${pause ? 'pausiert' : 'gestartet'}`);
+            this._setStateCached(`wallbox.${uuid}.pause`, pause);
+        } else {
+            this.log.warn(`Pause PUT fehlgeschlagen: HTTP ${code}`);
+        }
+    }
+
+    async _setPhaseswitching(phase) {
+        const body = JSON.stringify({ phase_usage: phase });
+        const code = await this._httpPut(
+            `http://${this.config.host}/api/e-mobility/config/phaseswitching`,
+            body
+        );
+        if (code === 204) {
+            this.log.info(`Phasen gesetzt: ${phase === 0 ? '3-phasig' : '1-phasig'}`);
+        } else {
+            this.log.warn(`Phaseswitching PUT fehlgeschlagen: HTTP ${code}`);
+        }
+    }
+
+    // ----------------------------------------------------------------
     // WebSocket Helper
     // ----------------------------------------------------------------
     _openWs(url, label, onMessage) {
@@ -362,6 +493,24 @@ class KostalKsem extends utils.Adapter {
                 headers: token ? { 'Authorization': `Bearer ${token}` } : {},
             }, (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => resolve(d)); });
             req.on('error', reject); req.end();
+        });
+    }
+
+    _httpPut(url, body) {
+        return new Promise((resolve, reject) => {
+            const { hostname, port, pathname } = new URL(url);
+            const req = http.request({
+                hostname, port: port || 80, path: pathname, method: 'PUT',
+                headers: {
+                    'Authorization':  `Bearer ${this._token}`,
+                    'Content-Type':   'application/json',
+                    'Content-Length': Buffer.byteLength(body),
+                },
+            }, (res) => {
+                res.resume(); // Body verwerfen
+                res.on('end', () => resolve(res.statusCode));
+            });
+            req.on('error', reject); req.write(body); req.end();
         });
     }
 }
