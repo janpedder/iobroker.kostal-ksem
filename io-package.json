@@ -1,7 +1,7 @@
 {
   "common": {
     "name": "kostal-ksem",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "title": "KOSTAL Smart Energy Meter",
     "titleLang": { "en": "KOSTAL Smart Energy Meter", "de": "KOSTAL Smart Energy Meter" },
     "desc": {
@@ -20,7 +20,21 @@
     "loglevel": "info",
     "adminUI": { "config": "json" }
   },
-  "native": {},
+  "native": {
+    "host": "",
+    "password": "",
+    "enableSmTotal": true,
+    "enableSmEnergyTotal": true,
+    "enableSmL1": true,
+    "enableSmEnergyL1": false,
+    "enableSmL2": true,
+    "enableSmEnergyL2": false,
+    "enableSmL3": true,
+    "enableSmEnergyL3": false,
+    "enableEnergyflow": true,
+    "enableWallbox": true,
+    "wallboxPollInterval": 5
+  },
   "objects": [],
   "instanceObjects": [
     {

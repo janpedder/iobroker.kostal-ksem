@@ -6,6 +6,34 @@ const WebSocket = require('ws');
 const { decodeSmartMeterMessage, decodeSumvaluesMessage } = require('./lib/protobuf');
 const { decodeObisDatapoint } = require('./lib/obis');
 
+// -------------------------------------------------------------------
+// OBIS C-Gruppe → Konfigurationsgruppe
+// C-Werte aus obis.js: 0x01-0x0e = gesamt, 0x15-0x21 = L1, 0x29-0x35 = L2, 0x3d-0x49 = L3
+// D=0x08 = Energiezähler, D=0x04 = Momentanwert
+// -------------------------------------------------------------------
+function getSmGroup(stateId) {
+    // stateId z.B. "active_power_plus", "voltage_l1", "active_power_plus_l1_kwh"
+    const isKwh = stateId.endsWith('_kwh');
+    const isL1  = stateId.includes('_l1');
+    const isL2  = stateId.includes('_l2');
+    const isL3  = stateId.includes('_l3');
+
+    if (isKwh) {
+        if (isL1) return 'enableSmEnergyL1';
+        if (isL2) return 'enableSmEnergyL2';
+        if (isL3) return 'enableSmEnergyL3';
+        return 'enableSmEnergyTotal';
+    } else {
+        if (isL1) return 'enableSmL1';
+        if (isL2) return 'enableSmL2';
+        if (isL3) return 'enableSmL3';
+        return 'enableSmTotal';
+    }
+}
+
+// -------------------------------------------------------------------
+// Sumvalues State-Definitionen
+// -------------------------------------------------------------------
 const SUMVALUES_STATES = {
     gridPowerTotal:            { name: 'Netzleistung gesamt (+Bezug/-Einspeisung)', unit: 'W',  role: 'value.power',   type: 'number' },
     pvPowerTotal:              { name: 'PV-Leistung gesamt (DC)',                   unit: 'W',  role: 'value.power',   type: 'number' },
@@ -29,8 +57,7 @@ const SUMVALUES_STATES = {
     batteryDischargeLimit:     { name: 'Batterie Entladelimit',                     unit: 'W',  role: 'value.power',   type: 'number' },
 };
 
-const WALLBOX_POLL_INTERVAL = 5000;
-
+// -------------------------------------------------------------------
 class KostalKsem extends utils.Adapter {
     constructor(options = {}) {
         super({ ...options, name: 'kostal-ksem' });
@@ -43,14 +70,17 @@ class KostalKsem extends utils.Adapter {
         this._wallboxTimer  = null;
         this._statesCreated = false;
         this._wallboxIds    = new Set();
-
-        // Cache: verhindert unnötige setState-Aufrufe
         this._stateCache    = new Map();
-        // Cache: verhindert wiederholte setObjectNotExistsAsync-Aufrufe
         this._objectCache   = new Set();
 
         this.on('ready',  this._onReady.bind(this));
         this.on('unload', this._onUnload.bind(this));
+    }
+
+    // Konfiguration mit Defaults lesen
+    _cfg(key, def) {
+        const v = this.config[key];
+        return (v === undefined || v === null) ? def : v;
     }
 
     async _onReady() {
@@ -73,8 +103,8 @@ class KostalKsem extends utils.Adapter {
             await this._login();
             await this._ensureStates();
             this._openSmartMeterWs();
-            this._openSumvaluesWs();
-            this._startWallboxPolling();
+            if (this._cfg('enableEnergyflow', true)) this._openSumvaluesWs();
+            if (this._cfg('enableWallbox',    true)) this._startWallboxPolling();
         } catch (err) {
             this.log.error(`Verbindungsfehler: ${err.message}`);
             this._scheduleReconnect();
@@ -97,8 +127,7 @@ class KostalKsem extends utils.Adapter {
     // Gecachtes setState — schreibt nur wenn Wert sich geändert hat
     // ----------------------------------------------------------------
     _setStateCached(id, val) {
-        const cached = this._stateCache.get(id);
-        if (cached === val) return; // keine Änderung → kein Event
+        if (this._stateCache.get(id) === val) return;
         this._stateCache.set(id, val);
         this.setState(id, { val, ack: true });
     }
@@ -161,32 +190,29 @@ class KostalKsem extends utils.Adapter {
     }
 
     // ----------------------------------------------------------------
-    // States einmalig anlegen (beim Start)
+    // States einmalig anlegen
     // ----------------------------------------------------------------
     async _ensureStates() {
         if (this._statesCreated) return;
         this._statesCreated = true;
 
-        for (const [id, name] of [
-            ['info',       'Geräteinfo'],
-            ['smartmeter', 'KSEM Messwerte'],
-            ['energyflow', 'Energiefluss'],
-            ['wallbox',    'Wallbox'],
-        ]) {
-            await this._ensureChannel(id, name);
-        }
+        const channels = [['info', 'Geräteinfo'], ['smartmeter', 'KSEM Messwerte']];
+        if (this._cfg('enableEnergyflow', true)) channels.push(['energyflow', 'Energiefluss']);
+        if (this._cfg('enableWallbox',    true)) channels.push(['wallbox',    'Wallbox']);
+        for (const [id, name] of channels) await this._ensureChannel(id, name);
 
         await this._ensureState('info.serial',   'Seriennummer',     'string', 'text');
         await this._ensureState('info.firmware', 'Firmware-Version', 'string', 'text');
         await this._ensureState('info.hostname', 'Hostname',         'string', 'text');
         await this._ensureState('info.mac',      'MAC-Adresse',      'string', 'text');
 
-        for (const [key, def] of Object.entries(SUMVALUES_STATES)) {
-            await this._ensureState(`energyflow.${key}`, def.name, def.type, def.role, def.unit);
+        if (this._cfg('enableEnergyflow', true)) {
+            for (const [key, def] of Object.entries(SUMVALUES_STATES)) {
+                await this._ensureState(`energyflow.${key}`, def.name, def.type, def.role, def.unit);
+            }
         }
     }
 
-    // Smart-Meter States: ebenfalls gecacht, werden nur einmal angelegt
     async _ensureSmartMeterState(stateId, unit, role) {
         await this._ensureState(`smartmeter.${stateId}`, stateId, 'number', role, unit);
     }
@@ -221,6 +247,11 @@ class KostalKsem extends utils.Adapter {
                 for (const { id, rawValue } of dps) {
                     const dp = decodeObisDatapoint(id, rawValue);
                     if (!dp) continue;
+
+                    // Prüfen ob diese Gruppe in der Konfiguration aktiviert ist
+                    const group = getSmGroup(dp.stateId);
+                    if (!this._cfg(group, true)) continue;
+
                     await this._ensureSmartMeterState(dp.stateId, dp.unit, dp.role);
                     this._setStateCached(`smartmeter.${dp.stateId}`, dp.value);
                 }
@@ -254,7 +285,8 @@ class KostalKsem extends utils.Adapter {
     _startWallboxPolling() {
         this._clearWallboxTimer();
         this._pollWallbox();
-        this._wallboxTimer = setInterval(() => this._pollWallbox(), WALLBOX_POLL_INTERVAL);
+        const interval = Math.max(2, this._cfg('wallboxPollInterval', 5)) * 1000;
+        this._wallboxTimer = setInterval(() => this._pollWallbox(), interval);
     }
 
     _clearWallboxTimer() {
@@ -297,21 +329,12 @@ class KostalKsem extends utils.Adapter {
     _openWs(url, label, onMessage) {
         let ws;
         try { ws = new WebSocket(url); } catch (err) {
-            this.log.error(`WS ${label} Fehler: ${err.message}`);
-            return null;
+            this.log.error(`WS ${label} Fehler: ${err.message}`); return null;
         }
-        ws.on('open', () => {
-            this.log.debug(`${label} verbunden`);
-            ws.send(`Bearer ${this._token}`);
-            this.setState('info.connection', true, true);
-        });
+        ws.on('open',    ()    => { this.log.debug(`${label} verbunden`); ws.send(`Bearer ${this._token}`); this.setState('info.connection', true, true); });
         ws.on('message', (data) => { if (Buffer.isBuffer(data)) onMessage(data); });
         ws.on('error',   (err)  => { this.log.warn(`${label} WS Fehler: ${err.message}`); });
-        ws.on('close',   (code) => {
-            this.log.warn(`${label} WS geschlossen (${code})`);
-            this.setState('info.connection', false, true);
-            this._scheduleReconnect();
-        });
+        ws.on('close',   (code) => { this.log.warn(`${label} WS geschlossen (${code})`); this.setState('info.connection', false, true); this._scheduleReconnect(); });
         return ws;
     }
 

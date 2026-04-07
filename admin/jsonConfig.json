@@ -1,23 +1,110 @@
 {
   "type": "panel",
   "items": {
+    "_connHeader": {
+      "type": "header",
+      "text": "Verbindung",
+      "size": 3
+    },
     "host": {
       "type": "text",
       "label": "IP-Adresse oder Hostname des KSEM",
       "placeholder": "192.168.0.131",
       "help": "Ohne http:// und ohne Slash am Ende",
-      "sm": 12,
-      "md": 6,
-      "newLine": true,
-      "validator": "^[^/]+$",
-      "validatorErrorText": "Kein http:// oder / verwenden"
+      "sm": 12, "md": 6,
+      "newLine": true
     },
     "password": {
       "type": "password",
       "label": "Passwort (Admin-Passwort der KSEM Weboberfläche)",
-      "sm": 12,
-      "md": 6,
-      "newLine": false
+      "sm": 12, "md": 6
+    },
+    "_smHeader": {
+      "type": "header",
+      "text": "Smart Meter – Datenpunkte",
+      "size": 3,
+      "newLine": true
+    },
+    "enableSmTotal": {
+      "type": "checkbox",
+      "label": "Gesamtwerte (Active power +/-, Reaktiv, Schein, Frequenz, Power factor)",
+      "newLine": true,
+      "sm": 12
+    },
+    "enableSmEnergyTotal": {
+      "type": "checkbox",
+      "label": "Energiezähler gesamt (kWh Bezug/Einspeisung)",
+      "newLine": true,
+      "sm": 12
+    },
+    "enableSmL1": {
+      "type": "checkbox",
+      "label": "Phasenwerte L1 (Leistung, Strom, Spannung, Power factor)",
+      "newLine": true,
+      "sm": 12
+    },
+    "enableSmEnergyL1": {
+      "type": "checkbox",
+      "label": "Energiezähler L1 (kWh)",
+      "newLine": true,
+      "sm": 12
+    },
+    "enableSmL2": {
+      "type": "checkbox",
+      "label": "Phasenwerte L2 (Leistung, Strom, Spannung, Power factor)",
+      "newLine": true,
+      "sm": 12
+    },
+    "enableSmEnergyL2": {
+      "type": "checkbox",
+      "label": "Energiezähler L2 (kWh)",
+      "newLine": true,
+      "sm": 12
+    },
+    "enableSmL3": {
+      "type": "checkbox",
+      "label": "Phasenwerte L3 (Leistung, Strom, Spannung, Power factor)",
+      "newLine": true,
+      "sm": 12
+    },
+    "enableSmEnergyL3": {
+      "type": "checkbox",
+      "label": "Energiezähler L3 (kWh)",
+      "newLine": true,
+      "sm": 12
+    },
+    "_efHeader": {
+      "type": "header",
+      "text": "Energiefluss (sumvalues)",
+      "size": 3,
+      "newLine": true
+    },
+    "enableEnergyflow": {
+      "type": "checkbox",
+      "label": "Energiefluss aktivieren (PV, Grid, Haus, Batterie, SOC, Wallbox-Leistung...)",
+      "newLine": true,
+      "sm": 12
+    },
+    "_wbHeader": {
+      "type": "header",
+      "text": "Wallbox",
+      "size": 3,
+      "newLine": true
+    },
+    "enableWallbox": {
+      "type": "checkbox",
+      "label": "Wallbox aktivieren (connected, charging, Strom, Phasen)",
+      "newLine": true,
+      "sm": 12
+    },
+    "wallboxPollInterval": {
+      "type": "number",
+      "label": "Wallbox Abfrageintervall (Sekunden)",
+      "min": 2,
+      "max": 60,
+      "sm": 12, "md": 4,
+      "newLine": true,
+      "hidden": "!data.enableWallbox"
     }
   }
 }
