@@ -80,6 +80,10 @@ class KostalKsem extends utils.Adapter {
         return (v === undefined || v === null) ? def : v;
     }
 
+    _smThrottleMs() {
+        return Math.max(1, this._cfg('updateInterval', 5)) * 1000;
+    }
+
     async _onReady() {
         this.log.info('KOSTAL KSEM Adapter gestartet');
         this.setState('info.connection', false, true);
@@ -156,10 +160,14 @@ class KostalKsem extends utils.Adapter {
 
     // ----------------------------------------------------------------
     // Gecachtes setState — schreibt nur wenn Wert sich geändert hat
+    // und das Throttle-Intervall abgelaufen ist
     // ----------------------------------------------------------------
-    _setStateCached(id, val) {
-        if (this._stateCache.get(id) === val) return;
-        this._stateCache.set(id, val);
+    _setStateCached(id, val, throttleMs = 0) {
+        const now = Date.now();
+        const cached = this._stateCache.get(id);
+        if (cached !== undefined && cached.val === val) return; // kein Wertewechsel
+        if (throttleMs > 0 && cached !== undefined && (now - cached.ts) < throttleMs) return; // zu früh
+        this._stateCache.set(id, { val, ts: now });
         this.setState(id, { val, ack: true });
     }
 
@@ -292,7 +300,7 @@ class KostalKsem extends utils.Adapter {
                     const group = getSmGroup(dp.stateId);
                     if (!this._cfg(group, true)) continue;
                     await this._ensureSmartMeterState(dp.stateId, dp.unit, dp.role);
-                    this._setStateCached(`smartmeter.${dp.stateId}`, dp.value);
+                    this._setStateCached(`smartmeter.${dp.stateId}`, dp.value, this._smThrottleMs());
                 }
             } catch (err) {
                 this.log.warn(`Smart-Meter Fehler: ${err.message}`);
@@ -310,7 +318,7 @@ class KostalKsem extends utils.Adapter {
                 const values = decodeSumvaluesMessage(buf);
                 for (const [key, val] of Object.entries(values)) {
                     if (val === null || !(key in SUMVALUES_STATES)) continue;
-                    this._setStateCached(`energyflow.${key}`, Math.round(val * 10) / 10);
+                    this._setStateCached(`energyflow.${key}`, Math.round(val * 10) / 10, this._smThrottleMs());
                 }
             } catch (err) {
                 this.log.warn(`Sumvalues Fehler: ${err.message}`);

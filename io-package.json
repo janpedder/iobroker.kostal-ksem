@@ -1,14 +1,19 @@
 {
   "common": {
     "name": "kostal-ksem",
-    "version": "0.4.1",
+    "version": "0.4.2",
     "title": "KOSTAL Smart Energy Meter",
-    "titleLang": { "en": "KOSTAL Smart Energy Meter", "de": "KOSTAL Smart Energy Meter" },
+    "titleLang": {
+      "en": "KOSTAL Smart Energy Meter",
+      "de": "KOSTAL Smart Energy Meter"
+    },
     "desc": {
       "en": "Adapter for KOSTAL Smart Energy Meter (KSEM) via WebSocket API",
       "de": "Adapter für KOSTAL Smart Energy Meter (KSEM) über WebSocket API"
     },
-    "authors": ["Jan Pedder"],
+    "authors": [
+      "Jan Pedder"
+    ],
     "license": "MIT",
     "platform": "Javascript/Node.js",
     "main": "main.js",
@@ -18,7 +23,9 @@
     "connectionType": "local",
     "dataSource": "push",
     "loglevel": "info",
-    "adminUI": { "config": "json" }
+    "adminUI": {
+      "config": "json"
+    }
   },
   "native": {
     "host": "",
@@ -33,14 +40,17 @@
     "enableSmEnergyL3": false,
     "enableEnergyflow": true,
     "enableWallbox": true,
-    "wallboxPollInterval": 5
+    "wallboxPollInterval": 5,
+    "updateInterval": 5
   },
   "objects": [],
   "instanceObjects": [
     {
       "_id": "info",
       "type": "channel",
-      "common": { "name": "Geräteinfo" },
+      "common": {
+        "name": "Geräteinfo"
+      },
       "native": {}
     },
     {

@@ -11,13 +11,45 @@
       "label": "IP-Adresse oder Hostname des KSEM",
       "placeholder": "192.168.0.131",
       "help": "Ohne http:// und ohne Slash am Ende",
-      "sm": 12, "md": 6,
+      "sm": 12,
+      "md": 6,
       "newLine": true
     },
     "password": {
       "type": "password",
       "label": "Passwort (Admin-Passwort der KSEM Weboberfläche)",
-      "sm": 12, "md": 6
+      "sm": 12,
+      "md": 6
+    },
+    "updateInterval": {
+      "type": "select",
+      "label": "Aktualisierungsintervall Messwerte",
+      "help": "Wie oft werden Leistung, Strom, Spannung maximal in ioBroker geschrieben",
+      "options": [
+        {
+          "value": 1,
+          "label": "1 Sekunde"
+        },
+        {
+          "value": 5,
+          "label": "5 Sekunden"
+        },
+        {
+          "value": 10,
+          "label": "10 Sekunden"
+        },
+        {
+          "value": 30,
+          "label": "30 Sekunden"
+        },
+        {
+          "value": 60,
+          "label": "60 Sekunden"
+        }
+      ],
+      "sm": 12,
+      "md": 4,
+      "newLine": true
     },
     "_smHeader": {
       "type": "header",
@@ -102,7 +134,8 @@
       "label": "Wallbox Abfrageintervall (Sekunden)",
       "min": 2,
       "max": 60,
-      "sm": 12, "md": 4,
+      "sm": 12,
+      "md": 4,
       "newLine": true,
       "hidden": "!data.enableWallbox"
     }

@@ -1,15 +1,25 @@
 {
   "name": "iobroker.kostal-ksem",
-  "version": "0.4.1",
-  "description": "ioBroker Adapter für KOSTAL Smart Energy Meter (KSEM) via WebSocket/JSON API",
+  "version": "0.4.2",
+  "description": "ioBroker Adapter f\u00fcr KOSTAL Smart Energy Meter (KSEM) via WebSocket/JSON API",
   "author": "Jan Pedder",
   "license": "MIT",
-  "keywords": ["ioBroker", "kostal", "ksem", "smart energy meter", "photovoltaik"],
+  "keywords": [
+    "ioBroker",
+    "kostal",
+    "ksem",
+    "smart energy meter",
+    "photovoltaik"
+  ],
   "main": "main.js",
-  "scripts": { "start": "node main.js" },
+  "scripts": {
+    "start": "node main.js"
+  },
   "dependencies": {
     "@iobroker/adapter-core": "^3.0.0",
     "ws": "^8.0.0"
   },
-  "engines": { "node": ">=18" }
+  "engines": {
+    "node": ">=18"
+  }
 }
