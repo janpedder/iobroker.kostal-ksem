@@ -206,13 +206,13 @@ class KostalKsem extends utils.Adapter {
         const expiresInSec = expiresIn > 100000 ? Math.round(expiresIn / 1000) : expiresIn;
         this._tokenExpiry = Date.now() + (expiresInSec - 60) * 1000;
 
-        this.log.info(`Login OK, Token gültig für ${Math.round(expiresInSec / 60)}min`);
+        this.log.debug(`Login OK, Token gültig für ${Math.round(expiresInSec / 60)}min`);
         await this._fetchDeviceInfo();
     }
 
     async _ensureToken() {
         if (Date.now() > this._tokenExpiry) {
-            this.log.info('Token abgelaufen, erneuere ...');
+            this.log.debug('Token abgelaufen, erneuere ...');
             await this._login();
         }
     }
@@ -225,7 +225,7 @@ class KostalKsem extends utils.Adapter {
             this._setStateCached('info.firmware', info.FirmwareVersion);
             this._setStateCached('info.hostname', info.hostname);
             this._setStateCached('info.mac',      info.Mac);
-            this.log.info(`Gerät: ${info.ProductName} SN=${info.Serial} FW=${info.FirmwareVersion}`);
+            this.log.debug(`Gerät: ${info.ProductName} SN=${info.Serial} FW=${info.FirmwareVersion}`);
         } catch (err) {
             this.log.warn(`Geräteinfo Fehler: ${err.message}`);
         }
